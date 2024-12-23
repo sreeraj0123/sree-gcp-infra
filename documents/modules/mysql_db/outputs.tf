@@ -1,9 +1,9 @@
-output "instance_connection_name" {
-  description = "Connection name for the Cloud SQL instance"
-  value       = google_sql_database_instance.default.connection_name
+output "instance_name" {
+  description = "The name of the SQL instance."
+  value       = google_sql_database_instance.default.name
 }
 
-output "public_ip_address" {
-  description = "Public IP address of the instance"
-  value       = google_sql_database_instance.default.public_ip_address
+output "instance_connection_name" {
+  description = "The connection name of the SQL instance."
+  value       = google_sql_database_instance.default.connection_name
 }

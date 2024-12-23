@@ -1,9 +1,9 @@
-output "instance_connection_name" {
-  description = "Connection name for the Cloud SQL instance"
-  value       = google_sql_database_instance.default.connection_name
+output "bucket_name" {
+  value       = google_storage_bucket.bucket.name
+  description = "The name of the GCP bucket."
 }
 
-output "public_ip_address" {
-  description = "Public IP address of the instance"
-  value       = google_sql_database_instance.default.public_ip_address
+output "bucket_url" {
+  value       = google_storage_bucket.bucket.url
+  description = "The URL of the GCP bucket."
 }

@@ -1,8 +1,4 @@
-provider "google" {
-  project     = var.project_id
-  region      = var.region
-  credentials = file(var.credentials_file)
-}
+
 
 module "mysql_db" {
   source          = "../modules/mysql_db"

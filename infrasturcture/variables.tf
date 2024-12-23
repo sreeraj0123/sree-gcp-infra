@@ -1,19 +1,41 @@
+
 variable "project_id" {
-  description = "GCP Project ID"
+  description = "The GCP project ID where the Cloud SQL instance will be created."
   type        = string
 }
 
 variable "region" {
-  description = "GCP Region"
+  description = "The region where the Cloud SQL instance will be created."
   type        = string
+  default     = "us-central1"
+} 
+
+variable "zone" {
+  description = "The GCP zone where the resources will be created (optional)."
+  type        = string
+  default     = null
 }
 
 variable "instance_name" {
-  description = "Name of the Cloud SQL instance"
+  description = "The name of the Cloud SQL instance."
   type        = string
+  default     = "quickstart-instance"
 }
 
-variable "credentials_file" {
-  description = "Path to the GCP service account key file"
+variable "database_version" {
+  description = "The version of the database."
   type        = string
+  default     = "MYSQL_8_0"
+}
+
+variable "tier" {
+  description = "The machine type tier for the instance (e.g., db-f1-micro, db-n1-standard-1)."
+  type        = string
+  default     = "db-g1-small" # 1 CPU, 4GB RAM equivalent
+}
+
+variable "root_password" {
+  description = "The root password for the database."
+  type        = string
+  sensitive   = true
 }
