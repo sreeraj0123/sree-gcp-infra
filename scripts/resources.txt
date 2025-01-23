@@ -1,0 +1,525 @@
+1) resource "google_project_service" "enabled_apis" {
+  for_each   = toset(var.api_services)
+  project    = var.project_id
+  service    = each.value
+  
+  disable_on_destroy = false # Keep API enabled even if Terraform destroy is run
+  disable_dependent_services = false  # Ensures dependent services are also disabled
+}
+
+2) resource "google_storage_bucket" "my_bucket" {
+  project       = var.project_id
+  name          = var.bucket_name
+  location      = var.location
+  storage_class = var.storage_class
+
+   # Enable force destruction of the bucket and its contents
+  force_destroy = true
+
+  # Enable versioning for state history tracking
+  versioning {
+    enabled = var.versioning_enabled
+  }
+
+  # Set lifecycle rules if specified
+  dynamic "lifecycle_rule" {
+    for_each = var.lifecycle_rules
+    content {
+      action {
+        type = lifecycle_rule.value.action_type
+      }
+      condition {
+        age                   = lookup(lifecycle_rule.value.condition, "age", null)
+        created_before        = lookup(lifecycle_rule.value.condition, "created_before", null)
+        #is_live               = lookup(lifecycle_rule.value.condition, "is_live", null)
+        num_newer_versions    = lookup(lifecycle_rule.value.condition, "num_newer_versions", null)
+      }
+    }
+  }
+
+  # Optional: Set retention policy for object locking
+  dynamic "retention_policy" {
+    for_each = var.enable_retention_policy ? [1] : []
+    content {
+      retention_period = var.retention_period_days * 86400 # Convert days to seconds
+      is_locked        = var.retention_policy_locked
+    }
+  }
+}
+
+3) resource "google_storage_bucket_iam_binding" "binding" {
+  bucket = var.bucket_name
+  role   = var.role
+
+  members = [
+    "serviceAccount:${var.service_account_email}"
+  ]
+}
+
+4) resource "google_service_account" "my_sa" {
+  project      = var.project_id
+  account_id   = var.service_account_name
+  display_name = var.display_name
+  description  = var.description
+}
+
+# Assign IAM roles to the Service Account
+5) resource "google_project_iam_member" "my_sa_roles" {
+  for_each = toset(var.roles)
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.my_sa.email}"
+}
+
+6) resource "google_service_account_iam_member" "cloud_run_sa_iam_binding" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${var.cloud_run_sa}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${var.cicd_sa}"
+}
+
+7) resource "google_artifact_registry_repository" "docker_repository" {
+  project       = var.project_id
+  location      = var.region
+  repository_id    = var.repository_id
+  description      = var.description
+  format           = "DOCKER"
+  mode             = var.mode
+  labels           = var.labels
+
+  /*
+  lifecycle {
+    prevent_destroy = true #var.prevent_destroy
+  }
+  */
+}
+
+8) resource "google_secret_manager_secret" "secret" {
+  project     = var.project_id
+  secret_id = var.secret_id
+  
+  replication {
+    auto {
+    }
+  }
+}
+
+9) resource "google_secret_manager_secret_version" "secret_version" {
+  secret      = google_secret_manager_secret.secret.id
+  secret_data = var.secret_data
+}
+
+# save twice to enable "latest"
+10) resource "google_secret_manager_secret_version" "secret_version2" {
+  secret      = google_secret_manager_secret.secret.id
+  secret_data = var.secret_data
+}
+
+11) resource "google_secret_manager_secret_version" "secret_version" {
+  secret      = "projects/${var.project_id}/secrets/${var.secret_id}"
+  secret_data = var.secret_value
+}
+
+12) resource "google_secret_manager_secret_iam_member" "secret_access" {
+  secret_id = var.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.service_account_email}"
+}
+
+13) resource "google_secret_manager_secret_iam_member" "secret_access" {
+  count    = length(var.secret_ids)
+  secret_id = var.secret_ids[count.index]
+  role      = var.role
+  member    = var.member
+}
+
+
+14) resource "google_secret_manager_secret_iam_member" "secret_access" {
+  project    = var.project_id
+  secret_id  = var.secret_id
+  role       = var.role
+  member     = "serviceAccount:${var.service_account_email}"
+}
+
+15) resource "google_cloudbuildv2_connection" "github_connection" {
+  location = var.region
+  name = var.connection_name
+
+  github_config {
+    app_installation_id = var.github_app_installation_id
+
+    authorizer_credential {
+
+      oauth_token_secret_version = "projects/${var.project_id}/secrets/${var.secret_id}/versions/latest"
+    }
+  }
+}
+
+16) 
+resource "google_iam_workload_identity_pool" "github_pool" {
+  provider                  = google-beta
+  project                   = var.project_id 
+  workload_identity_pool_id = var.wi_pool_id
+  display_name              = var.wi_pool_name
+  description               = "WI Pool"
+
+  
+}
+
+# create WI provider
+17) resource "google_iam_workload_identity_pool_provider" "github_provider" {
+  provider = google-beta
+  project  = var.project_id 
+  workload_identity_pool_id         = google_iam_workload_identity_pool.github_pool.workload_identity_pool_id
+  workload_identity_pool_provider_id = var.wi_pool_provider_id
+  display_name                      = "WI Pool Provider"
+
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.actor"      = "assertion.actor"
+    "attribute.repository" = "assertion.repository"
+  }
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+
+  # Specify the condition to match GitHub's repository claim
+  attribute_condition = "attribute.repository == '${var.github_repository}'"
+
+
+}
+
+# bind the service account with workload Identity
+18) resource "google_service_account_iam_binding" "workload_identity_binding" {
+  service_account_id = var.service_account_id
+  role     = "roles/iam.workloadIdentityUser"
+  #project  = var.project_id 
+
+  members = [
+    "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.repository/${var.github_repository}"
+  ]
+
+}
+
+19) resource "google_cloudbuildv2_repository" "my_repository" {
+  location = var.region
+  name = var.repo_name_gcp
+  parent_connection = var.connection_parent
+  remote_uri = var.repo_uri_remote
+}
+
+resource "google_cloudbuildv2_repository" "my_repository" {
+  location = var.region
+  name = var.repo_name_gcp
+  parent_connection = var.connection_parent
+  remote_uri = var.repo_uri_remote
+}
+
+
+
+20) resource "google_cloudbuild_trigger" "cloud_build_trigger" {
+  name        = var.trigger_name
+  description = "Trigger to build and deploy using Cloud Build"
+  project     = var.project_id
+  filename = var.cloudbuild_yaml_path
+  service_account = var.service_account
+  included_files = ["**"]
+  ignored_files  = []
+  disabled = filebase64sha512()
+
+  github {    
+    #owner  = var.connection_parent
+    #name   = var.repo_name_gcp
+    owner = var.github_owner
+    name = google_cloudbuildv2_repository.my_repository.repository.name
+
+    push {
+      branch = var.branch_pattern
+    }
+  }
+
+  /*
+  trigger_template {
+    project_id = var.project_id
+    repo_name  = var.repo_name_gcp
+    branch_name = var.branch_pattern
+    dir         = "." # Specify the working directory if needed
+  }
+  */
+
+  substitutions = {
+    _CUSTOM_VAR_1 = var.custom_variable_1
+    _CUSTOM_VAR_2 = var.custom_variable_2
+    _CUSTOM_VAR_3 = var.custom_variable_3
+  }
+
+  
+}
+
+module "cicd_service_account" {
+  source               = "../a03_gcp_service_account"
+  project_id           = var.project_id
+  service_account_name = var.cicd_sa_name
+  display_name         = "cicd Service Account"
+  description          = "This service account is used for CI/CD operations"
+
+  roles = var.cicd_sa_role_list
+
+}
+
+# a build log bucket
+module "build_logs_bucket" {
+  source                  = "../../modules/a02_gcp_storage_bucket"
+  project_id              = var.project_id
+  bucket_name             = var.bucket_name
+  location                = var.region  #"US", "EU", "ASIA" multi-regional bucket
+  storage_class           = "STANDARD" # Nearline, Coldline, Archive
+  versioning_enabled      = true
+  enable_retention_policy = true
+  retention_period_days   = 30
+  retention_policy_locked = false
+  lifecycle_rules = [
+    {
+      action_type = "Delete"
+      condition   = { age = 365 }
+    }
+  ]
+
+  depends_on   = [module.cicd_service_account]
+}
+
+# permission to bucket
+module "build_logs_bucket_iam_binding" {
+  source           = "../../modules/a02a_gcp_storage_bucket_iam_binding"
+  bucket_name      = var.bucket_name
+  service_account_email   = local.service_account_email
+  role             = "roles/storage.objectAdmin"
+
+  depends_on   = [module.build_logs_bucket]
+}
+
+
+# github token access
+module "github_token_secret_access" {
+  source              = "../b03_gcp_secret_iam_member"
+  secret_id = var.github_secret_id
+  service_account_email = module.cicd_service_account.service_account_email
+
+  depends_on   = [module.cicd_service_account]
+}
+
+
+# workload_identity
+module "workload_identity_pool" {
+  source           = "../c02_gcp_iam_workload_identity_pool"
+  project_id = var.project_id
+  wi_pool_id = var.wi_pool_id
+  wi_pool_name = var.wi_pool_name
+  wi_pool_provider_id = var.wi_pool_provider_id
+  github_repository = var.github_repository
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${var.cicd_sa_name}@${var.project_id}.iam.gserviceaccount.com"
+
+  depends_on   = [module.cicd_service_account]
+}
+
+# github connection - common for all cicd pipeline
+
+
+# repository link
+module "github_repository_link" {
+  source = "../c03_gcp_cloudbuild_repository"
+
+  region  = var.region
+  connection_parent  = var.connection_parent
+  repo_name_gcp = var.repo_name_gcp
+  repo_uri_remote = var.repo_uri_remote
+
+}
+
+# cloud build trigger - manual
+
+resource "google_compute_network" "vpc_network" {
+  name                    = var.network_name
+  auto_create_subnetworks = var.auto_create_subnetworks
+  project                 = var.project_id
+}
+
+resource "google_compute_subnetwork" "subnet" {
+  name          = var.subnet_name
+  ip_cidr_range = var.subnet_ip_range
+  region        = var.subnet_region
+  network       = var.network_self_link
+  project       = var.project_id
+}
+
+resource "google_compute_firewall" "firewall_rule" {
+  name    = var.rule_name
+  project = var.project_id
+  network = var.network
+
+  # Define the direction of traffic: either INGRESS or EGRESS
+  direction = var.direction
+
+  # Priority of the rule (lower number is higher priority)
+  priority = var.priority
+
+  # Define allowed protocols and ports
+  allow {
+    protocol = var.allow_protocol
+    ports    = var.allow_ports
+  }
+
+  # Define the source or target ranges based on direction
+  source_ranges = var.direction == "INGRESS" ? var.source_ranges : null
+  destination_ranges = var.direction == "EGRESS" ? var.destination_ranges : null
+
+  # Optional - target tags for VM instances
+  target_tags = var.target_tags
+}
+
+resource "google_sql_database_instance" "postgres_instance" {
+  name             = var.instance_name
+  database_version = var.database_version
+  project          = var.project_id
+  region           = var.region
+
+  settings {
+    tier            = var.tier
+    availability_type = var.availability_type
+    backup_configuration {
+      enabled = true
+    }
+    ip_configuration {
+      ipv4_enabled    = true
+      private_network = var.enable_private_ip ? "projects/${var.project_id}/global/networks/${var.vpc_name}" : null
+
+      #require_ssl     = true
+    }
+  }
+}
+
+resource "google_sql_database" "my_database" {
+  name     = var.database_name
+  instance = google_sql_database_instance.postgres_instance.name
+  project = var.project_id
+}
+
+resource "google_sql_user" "db_user" {
+  name     = var.db_user
+  instance = google_sql_database_instance.postgres_instance.name
+  password = var.db_password
+  project = var.project_id
+}
+
+resource "google_compute_global_address" "private_ip_address" {
+  name          = "${var.instance_name}-private-ip"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  prefix_length = 24
+  network       = local.vpc_self_link
+  project       = var.project_id
+  region        = var.region
+}
+
+resource "google_service_networking_connection" "private_vpc_connection" {
+  provider         = google-beta
+  network          = local.vpc_self_link
+  service          = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_ip_address.name]
+  project          = var.project_id
+}
+
+resource "google_sql_database_instance" "postgres_instance" {
+  name             = var.instance_name
+  project          = var.project_id
+  region           = var.region
+
+  settings {
+    tier              = "db-f1-micro" # Adjust the machine type as needed
+    ip_configuration {
+      ipv4_enabled    = false # true
+      private_network = google_compute_global_address.private_ip_address.self_link
+    }
+  }
+
+  database_version  = "POSTGRES_14" # Adjust the PostgreSQL version if needed
+}
+
+
+resource "google_sql_database" "my_database" {
+  name     = var.database_name
+  instance = google_sql_database_instance.postgres_instance.name
+  project = var.project_id
+}
+
+resource "google_sql_user" "db_user" {
+  name     = var.db_user
+  instance = google_sql_database_instance.postgres_instance.name
+  password = var.db_password
+  project = var.project_id
+}
+
+resource "google_sql_database_instance" "mysql_instance" {
+  name             = var.mysql_instance_name
+  project          = var.project_id
+  region           = var.region
+  database_version = "MYSQL_8_0"
+
+  settings {
+    tier              = var.tier
+    #storage_size_gb   = var.storage_size
+    disk_size = var.storage_size
+    ip_configuration {
+      private_network = var.vpc_network
+    }
+  }
+}
+
+resource "google_sql_database" "database" {
+  name     = var.database_name
+  instance = google_sql_database_instance.mysql_instance.name
+  project  = var.project_id
+}
+
+resource "google_sql_user" "database_user" {
+  name     = var.database_user
+  instance = google_sql_database_instance.mysql_instance.name
+  project  = var.project_id
+  password = var.database_password
+}
+
+
+
+resource "google_sql_database_instance" "quickstart_instance" {
+  name             = var.sql_instance_name
+  database_version = "MYSQL_8_0"
+  region = var.region
+
+  settings {
+    tier = "db-f1-micro"  # Equivalent to 1 vCPU, 4GB RAM tier. Adjust as needed
+    /*
+    ip_configuration {
+        ipv4_enabled = false
+        private_network = local.subnet_self_link 
+    }
+    */
+  }
+
+  root_password = var.db_root_password
+  project = var.project_id
+}
+
+resource "google_sql_database" "quickstart_db" {
+  name     = var.db_name
+  instance = google_sql_database_instance.quickstart_instance.name
+  project = var.project_id
+}
+
+resource "google_sql_user" "quickstart_user" {
+  name     = var.db_user
+  instance = google_sql_database_instance.quickstart_instance.name
+  password = var.db_user_password
+  project = var.project_id
+}
+
+
