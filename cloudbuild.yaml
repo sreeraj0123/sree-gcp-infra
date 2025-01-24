@@ -86,7 +86,7 @@ logsBucket: "gs://${_LOG_BUCKET}"
 substitutions:
   _BRANCH_NAME: "main"
   _REGION: "us-central1"
-  #_LOG_BUCKET: "spn-run-app-logs"
+  _LOG_BUCKET: "sree-gcp-dev-2-infra-logs"
 
 options:
   env:
